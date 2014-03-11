@@ -1,0 +1,1026 @@
+Since the project files are provided and cannot be opened, below is
+the contents of the assembly files within.
+
+libplp_float.asm
+# Damon Cost - The A Team
+# 3/14/2013
+# 32 bit floating point number processing
+
+### PROCESSING ###
+# $a0 - top of array
+# $a1 - bottom of left to be processed
+# $a2 - decimal index (left length)
+
+libplp_float_process_left_large:
+	push $31
+	jal libplp_float_array9_toreg
+	nop
+	move $t0, $v0 #number to be processed
+	
+	#### NEW CODE ####
+	slti $t2, $a2, 18
+	
+	#second register
+	#start of next 9 digits
+	addiu $a0, $a1, -4
+	#default end of next 9 digits
+	addiu $a1, $a0, -32
+	#need to branch if # digits < 18
+	#for dynamic processing of reg 2
+	#>= to 18 will use default 9 digits
+	slti $t2, $a2, 18
+	beq $t2, $0, pll_skip_2reg_dynamic
+	nop
+	#move from default location in memory
+	# (len - ((len-9) * 2)) * 4 = loc offset
+	# then add to default location
+	addiu $t2, $a2, -9
+	sll $t2, $t2, 1
+	subu $t2, $a2, $t2
+	sll $t2, $t2, 2
+	addu $a1, $a1, $t2
+	# convert to 1 reg
+	push $t0
+	jal libplp_float_array9_toreg
+	nop
+	# save reg2 and jump to process
+	move $t6, $v0
+	# need to add padding for easy processing
+	# using 9 digit msd function
+	# padding = 9 - (length - 9)
+	li $t3, 9
+	subu $t2, $a2, $t3
+	subu $t2, $t3, $t2
+	# reg2 x 10 for # of padding digits
+	li $t3, 10
+	pll_reg2_pad_loop:
+	mullo $t6, $t6, $t3
+	addiu $t2, $t2, -1
+	beq $t2, $0, pll_process
+	nop
+	j pll_reg2_pad_loop
+	nop
+
+	# if using default 9 digit reg2
+	pll_skip_2reg_dynamic:
+	push $t0
+	jal libplp_float_array9_toreg
+	nop
+	move $t6, $v0
+
+	# $t0 is reg1
+	# $t6 is reg2
+	pll_process:
+	pop $t0
+	pop $31
+	and $t1, $t1, $0 # exponent counter
+	addiu $t2, $a2, -9 # digit offset
+	li $t3, 10 #for mullo
+	li $t4, 100000000
+	li $t7, 0x1dcd6500
+
+	libplp_float_pll_loop:
+	# get reg1 # of digits
+	slt $t5, $t0, $t4
+	# if 8 mullo by 10
+	beq $t5, $0, skip_pll_x10 
+	nop
+	mullo $t0, $t0, $t3 # num x 10
+	#get reg2 msd
+	push $31
+	push $a0
+	push $t0
+	push $t1
+	move $a0, $t6
+	jal decimal_get_msd
+	nop
+	move $t5, $v0
+	pop $t1
+	pop $t0
+	pop $a0
+	pop $31
+	#add reg2 msd to reg1
+	addu $t0, $t0, $t5
+	#take msd out of reg2
+	mullo $t5, $t5, $t4
+	subu $t6, $t6, $t5
+	#mullo reg2 by 10
+	mullo $t6, $t6, $t3
+	addiu $t2, $t2, -1 # offset--
+	beq $t2, $0, libplp_float_shift_left_in
+	nop
+	skip_pll_x10:
+
+	# get lsb of reg1
+	andi $t5, $t0, 1
+	# shift both reg 1r
+	srl $t0, $t0, 1
+	srl $t6, $t6, 1
+	# add 5 into reg2 msd if reg1 is odd
+	mullo $t5, $t5, $t7
+	addu $t6, $t5, $t6
+	addiu $t1, $t1, 1 # exponent++
+	j libplp_float_pll_loop
+	nop
+	
+	libplp_float_shift_left_in:
+	# shift left side in and count for exponent
+	move $a0, $t0 #left side
+	move $t3, $t1 #current exponent
+	li $t1, 1 # for comparison to see if finished
+	lui $t0, 0x8000 #for shifting 1 in from left
+
+	shift_left_in_loop: #$a0 is left side
+	beq $a0, $t1, exponent #if left done, go to exponent
+	nop
+	and $t2, $a0, $t1 # get lsb
+	beq $t2, $t1, shift_1l # if its a 1
+	nop
+	#else
+	srl $v0, $v0, 1 # shift bits over in final(shift 0)
+	srl $a0, $a0, 1 # shift left side 1 bit
+	addiu $t3, $t3, 1 # accumulate exponent counter
+	j shift_left_in_loop
+	nop
+
+	shift_1l:
+	srl $v0, $v0, 1 # shift bits over
+	or $v0, $v0, $t0 # place 1 in msb
+	srl $a0, $a0, 1 # shift left side 1 bit
+	addiu $t3, $t3, 1 # accumulate exponent counter
+	j shift_left_in_loop
+	nop
+
+	# $t1 has 1 in it
+	exponent:
+	li $t1, 1 #for getting lsb of exponent
+	addiu $t3, $t3, 127 # exponent offset
+	li $t2, 8 # loop counter
+	lui $t0, 0x8000
+
+	exponent_loop:
+	beq $t2, $zero, add_sign
+	nop
+	addiu $t2, $t2, -1 # decriment counter
+	and $t4, $t3, $t1 # get lsb of exponent part
+	bne $t4, $zero, shift_1e # if lsb is 1
+	nop
+	#else
+	srl $v0, $v0, 1 # shift bits over (with 0)
+	srl $t3, $t3, 1 # shift exponent part
+	j exponent_loop
+	nop
+
+	shift_1e:
+	srl $v0, $v0, 1 # shift bits over
+	or $v0, $v0, $t0 # place 1 in msb
+	srl $t3, $t3, 1 # shift exponent part
+	j exponent_loop
+	nop
+
+	add_sign:
+	lui $t5, 0x8000
+	li $t2, 1
+	and $t2, $t2, $v0 #get rounding flag
+	round_large_left:
+	srl $v0, $v0, 1 #shift over
+	beq $s0, $0, make_positive
+	nop
+	or $v0, $v0, $t5
+	make_positive:
+	beq $t2, $0, skip_round #check if need to round
+	nop
+	addiu $v0, $v0, 1 #round if necessary
+	skip_round:
+	
+	jr $31
+	nop
+
+
+libplp_float_process_left_small:
+	push $31
+	jal libplp_float_process_right
+	nop
+	pop $31
+	jr $31
+
+# $a0 - top of array
+# $a1 - array length
+# $a2 - decimal index
+# $a3 - decimal memory location
+libplp_float_process_right:
+	push $31
+	#move $t9, $31 #store return
+	subu $t0, $a1, $a2 #length of number to right
+	addiu $t0, $t0, -1
+	sltiu $t1, $t0, 10 #if digits > 9
+	bne $t1, $0, process_right_less_than_9 
+	nop
+	addiu $t3, $a3, -36
+	addiu $t2, $a3, -4
+	li $t0, 9
+	push $t0
+	j libplp_float_process_right_loop_done
+	nop
+
+	process_right_less_than_9:
+	move $t2, $a3 #store decimal location
+	addiu $t2, $t2, -4 #start of right of decimal
+
+	#get end of right side
+	move $t3, $t2
+	push $t0
+	
+	libplp_float_process_right_loop:
+	addiu $t0, $t0, -1
+	beq $t0, $0, libplp_float_process_right_loop_done
+	nop
+	addiu $t3, $t3, -4
+	j libplp_float_process_right_loop
+	nop
+
+	libplp_float_process_right_loop_done:
+	push $a0
+	push $a1
+	move $a0, $t2 #pass start of right
+	move $a1, $t3 #pass end of right
+	jal libplp_float_array9_toreg
+	nop
+	move $t2, $v0 #store for single register
+	pop $a1
+	pop $a0
+	pop $t0
+	#$t0 contains length of number
+	#$t2 contains the number
+	li $t1, 1
+	li $t5, 10
+	# get number used to detect overflow in processing
+	process_right_mask:
+	beq $t0, $0, process_right_mask_done
+	nop
+	mullo $t1, $t1, $t5
+	addiu $t0, $t0, -1 
+	j process_right_mask
+	nop
+	process_right_mask_done:
+	#$t1 is mask
+	#$t2 is number
+
+	
+	move $t5, $t1
+	li $t6, 32 #counter for final
+
+	# right side
+	and $v0, $v0, $zero #clear the destination
+	right_side:
+	addu $t2, $t2, $t2 #double $a1
+	beq $t6, $zero, shift_1_done # if equal process done
+	nop
+	addiu $t6, $t6 -1
+	slt $t1, $t2, $t5 # is there carry over (0 in $t1)
+	beq $t1, $zero, shift_1 #if carryover
+	nop
+
+	sll $v0, $v0, 1 # shift 0 bit in
+	j right_side
+	nop
+
+	shift_1: # shift 1 bit in
+
+	sll $v0, $v0, 1 # shift bits over
+	addiu $v0, $v0, 1 # place 1 in lsb
+	subu $t2, $t2, $t5 # get remainder
+	j right_side
+	nop
+
+	shift_1_done: # finished with right side
+	#process left
+	
+	# go back to less than zero if flag raised
+	bne $t3, $0, skip_return_to_less_than_zero
+	nop
+	jr $31
+	nop
+	skip_return_to_less_than_zero:
+	push $a0
+	push $a1
+ 	push $v0
+	push $31
+	addiu $a1, $a3, 4
+	jal libplp_float_array9_toreg
+	nop
+	move $t0, $v0 #left side of decimal
+	pop $31
+	pop $v0 #right side of decimal
+	pop $a1
+	pop $a0
+	and $t1, $t1, $0
+	jal libplp_float_shift_left_in
+	nop
+
+	pop $31
+	jr $31
+	#jr $t9
+	nop
+
+
+### PROCESSING FOR NUMBERS LESS THAN 0
+# $a0 - top of array
+# $a1 - array length
+# $a2 - decimal index
+# $a3 - decimal memory location
+libplp_float_process_less_than_zero:
+	push $31 #store return
+	push $a0	
+	addiu $a0, $a3, -4
+	jal libplp_float_get_decimal_shift
+	nop
+	move $t0, $v0 # number of leading zero
+	move $t1, $v1 # start of non zeros
+	### next is to array to reg the start and finish
+	#get number of digits after zeros - len-(0s+2)
+	addiu $t2, $t0, 1
+	subu $t2, $a1, $t2
+	li $t3, 8
+	slti $t4, $t2, 9 #1 if digits < 9
+	### calc address of end of number to process
+	beq $t4, $0, digits_greater_than_8
+	nop
+	addiu $t3, $t2, -1
+	digits_greater_than_8:	
+	sll $t3, $t3, 2
+	subu $t3, $t1, $t3 #address of bottom of number
+	push $a1
+	push $t0
+	move $a0, $t1 #pass top of number
+	move $a1, $t3 #pass bottom of number 
+	jal libplp_float_array9_toreg
+	nop
+	move $t1, $v0
+	pop $t0
+	pop $a1
+	pop $a0
+	pop $31
+	########################################
+	# $t0 - # of decimals to shift
+	# $t1 - # to process
+	# $t2 - # of digits in $t1 / 2nd reg for process
+	# $t3 - full register indicator
+	# $t4 - floating indicator
+	# $t5 - exponent
+	########################################
+	li $t3, 1000000000 #full regisiter indicator
+	#floating indicator need 1 more digit than the number
+	## $t4 * 10 ^ $t2
+	li $t4, 1
+	li $t5, 10
+	floating_indicator_loop:
+	#if digits == 0
+	beq $t2, $0, floating_indicator_loop_done
+	nop
+	mullo $t4, $t4, $t5
+	addiu $t2, $t2, -1
+	j floating_indicator_loop
+	nop
+	floating_indicator_loop_done:
+	and $t5, $t5, $0 #exponent
+	lib_plpfloat_leading_zeros:
+	#if no leading zeros, move to mantissa op
+	beq $t0, $0, lib_plpfloat_less_0_mantissa
+	nop
+	#multiply by 2
+	sll $t1, $t1, 1
+	#decriment exponent
+	addiu $t5, $t5, -1
+	#check against indicator
+	slt $t6, $t1, $t4
+	#while # less than indicator loop
+	bne $t6, $0, lib_plpfloat_leading_zeros
+	nop
+	#decriment number of zeros
+	addiu $t0, $t0, -1
+	#if $t1 is full
+	beq $t3, $t4, lib_plpfloat_leading_zeros_2reg
+	nop 
+	#multiply indicator by 10
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	j lib_plpfloat_leading_zeros
+	nop
+
+	lib_plpfloat_leading_zeros_2reg:
+	# set-up
+	# remove carryover from $t1
+	subu $t1, $t1, $t3
+	# place carryover into $t2
+	addiu $t2, $0, 1
+	# floating indicator = 10
+	li $t4, 10
+	# set-up finished
+	lib_plpfloat_lz2reg_loop:
+	# end condition decimal shift == 0
+	beq $t0, $0, lib_plpfloat_lz2reg_to_1reg
+	nop
+	# reg1 x 2
+	sll $t1, $t1, 1
+	# reg2 x 2
+	sll $t2, $t2, 1
+	# decriment exponent
+	addiu $t5, $t5, -1
+	#check if carry needed
+	slt $t6, $t1, $t3 # 0 if carry needed
+	beq $t6, $0, lz2reg_carry
+	nop
+	lz2reg_leading_zero_check:
+	#check for leading register carry
+	slt $t6, $t2, $t4 # 0 if carry
+	beq $t6, $0, lz2reg_lead_carry
+	nop
+	lz2reg_check_leading_reg_full:
+	#check if left register is full (10 digits)
+	slt $t6, $t2, $t3 # 0 if 10 digits
+	beq $t6, $0, lib_plpfloat_leading_zeros_3reg
+	nop
+	j lib_plpfloat_lz2reg_loop
+	nop
+
+	lz2reg_move_leading_reg:
+	#move reg2 to reg1
+	move $t1, $t2
+	# remove carryover from $t1
+	subu $t1, $t1, $t3
+	# reset then place carryover into $t2
+	addiu $t2, $0, 1
+	j lib_plpfloat_lz2reg_loop
+	nop
+
+	lz2reg_lead_carry:
+	#decriment decimal shift
+	addiu $t0, $t0, -1
+	#incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	j lz2reg_check_leading_reg_full	
+	nop
+
+	lz2reg_carry:
+	# remove carryover from $t1
+	subu $t1, $t1, $t3
+	# place carryover into $t2
+	addiu $t2, $t2, 1
+	j lz2reg_leading_zero_check
+	nop
+
+	lib_plpfloat_lz2reg_to_1reg:
+	# check if number has nine digits in leading reg
+	beq $t3, $t4, lib_plpfloat_lz2reg_done
+	nop
+	# incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	# store state
+	push $31
+	push $t1
+	push $a0
+	# pass trailing register
+	move $a0, $t1
+	# get msd of trailing
+	jal decimal_get_msd
+	nop
+	# restore state
+	pop $a0
+	pop $t1
+	pop $31
+	# subtract msd
+	mullo $t0, $t0, $v0
+	subu $t1, $t1, $t0
+	# multiply both registers by 10
+	mullo $t1, $t1, $t6
+	mullo $t2, $t2, $t6
+	# add msd into leading reg
+	addu $t2, $t2, $v0
+	j lib_plpfloat_lz2reg_to_1reg
+	nop
+	
+	lib_plpfloat_lz2reg_done:
+	move $t1, $t2
+	j lib_plpfloat_less_0_mantissa
+	nop
+	
+	lib_plpfloat_leading_zeros_3reg:
+	# set-up
+	# $t7 will be 3rd/leading reg
+	# remove carryover from $t2
+	subu $t2, $t2, $t3
+	# place carryover into $t7
+	addiu $t7, $0, 1
+	# floating indicator = 10
+	li $t4, 10
+	# set-up finished
+	lib_plpfloat_lz3reg_loop:
+	# end condition decimal shift == 0
+	beq $t0, $0, lib_plpfloat_lz3reg_to_1reg
+	nop
+	# reg1 x 2
+	sll $t1, $t1, 1
+	# reg2 x 2
+	sll $t2, $t2, 1
+	# reg3 x 2
+	sll $t7, $t7, 1
+	# decriment exponent
+	addiu $t5, $t5, -1
+	#check if reg1 carry needed
+	slt $t6, $t1, $t3 # 0 if carry needed
+	beq $t6, $0, lz3reg1_carry
+	nop
+	lz3check_reg2_carry:
+	#check if reg2 carry needed
+	slt $t6, $t2, $t3 # 0 is carry needed
+	beq $t6, $0, lz3reg2_carry
+	nop
+
+	lz3reg_leading_zero_check:
+	#check for leading register carry
+	slt $t6, $t7, $t4 # 0 if carry
+	beq $t6, $0, lz3reg_lead_carry
+	nop
+	lz3reg_check_leading_reg_full:
+	#check if left register is full (10 digits)
+	slt $t6, $t7, $t3 # 0 if 10 digits
+	beq $t6, $0, lib_plpfloat_leading_zeros_4reg
+	nop
+	j lib_plpfloat_lz3reg_loop
+	nop
+
+	lz3reg_shift_left_2_reg:
+	#move reg2 to reg1
+	move $t1, $t2
+	#move reg3 to reg2
+	move $t2, $t7
+	# remove carryover from $t2
+	subu $t2, $t2, $t3
+	# reset then place carryover into $t7
+	addiu $t7, $0, 1
+	j lib_plpfloat_lz3reg_loop
+	nop
+
+	lz3reg_lead_carry:
+	#decriment decimal shift
+	addiu $t0, $t0, -1
+	#incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	j lz3reg_check_leading_reg_full	
+	nop
+
+	lz3reg1_carry:
+	# remove carryover from $t1
+	subu $t1, $t1, $t3
+	# place carryover into $t2
+	addiu $t2, $t2, 1
+	j lz3check_reg2_carry
+	nop
+
+	lz3reg2_carry:
+	# remove carryover from $t2
+	subu $t2, $t2, $t3
+	# place carry into $t7
+	addiu $t7, $t7, 1
+	j lz3reg_leading_zero_check
+	nop
+
+	lib_plpfloat_lz3reg_to_1reg:
+	# check if number has nine digits in leading reg
+	beq $t3, $t4, lib_plpfloat_lz3reg_done
+	nop
+	# incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	# store state
+	push $31
+	push $t1
+	push $a0
+	# pass reg2
+	move $a0, $t2
+	# get msd of reg2
+	jal decimal_get_msd
+	nop
+	# restore state
+	pop $a0
+	pop $t1
+	pop $31
+	# remove msd from reg2
+	# 100000000 in t0
+	mullo $t0, $t0, $v0
+	subu $t2, $t2, $t0
+	# multiply reg2 and reg3 by 10
+	mullo $t2, $t2, $t6
+	mullo $t7, $t7, $t6
+	# add msd into leading reg
+	addu $t7, $t7, $v0
+	j lib_plpfloat_lz3reg_to_1reg
+	nop
+	
+	lib_plpfloat_lz3reg_done:
+	move $t1, $t7
+	j lib_plpfloat_less_0_mantissa
+	nop
+
+	lib_plpfloat_leading_zeros_4reg:
+	# set-up
+	# $t1 - reg1
+	# $t2 - reg2
+	# $t7 - reg3
+	# $t8 - reg4
+	# remove carryover from $t7
+	subu $t7, $t7, $t3
+	# place carryover into $t8
+	addiu $t8, $0, 1
+	# floating indicator = 10
+	li $t4, 10
+	# set-up finished
+	lib_plpfloat_lz4reg_loop:
+	# end condition decimal shift == 0
+	beq $t0, $0, lib_plpfloat_lz4reg_to_1reg
+	nop
+	# reg1 x 2
+	sll $t1, $t1, 1
+	# reg2 x 2
+	sll $t2, $t2, 1
+	# reg3 x 2
+	sll $t7, $t7, 1
+	# reg4 x 2
+	sll $t8, $t8, 1
+	# decriment exponent
+	addiu $t5, $t5, -1
+	#check if reg1 carry needed
+	slt $t6, $t1, $t3 # 0 if carry needed
+	beq $t6, $0, lz4reg1_carry
+	nop
+	lz4check_reg2_carry:
+	#check if reg2 carry needed
+	slt $t6, $t2, $t3 # 0 is carry needed
+	beq $t6, $0, lz4reg2_carry
+	nop
+	lz4check_reg3_carry:
+	#check if reg3 carry needed
+	slt $t6, $t7, $t3 # 0 is carry needed
+	beq $t6, $0, lz4reg3_carry
+	nop
+
+	lz4reg_leading_zero_check:
+	#check for leading register carry
+	slt $t6, $t8, $t4 # 0 if carry
+	beq $t6, $0, lz4reg_lead_carry
+	nop
+	lz4reg_check_leading_reg_full:
+	#check if left register is full (10 digits)
+	slt $t6, $t8, $t3 # 0 if 10 digits
+	beq $t6, $0, lib_plpfloat_leading_zeros_5reg
+	nop
+	j lib_plpfloat_lz4reg_loop
+	nop
+
+	lz4reg_shift_left_3_reg:
+	#move reg2 to reg1
+	move $t1, $t2
+	#move reg3 to reg2
+	move $t2, $t7
+	#move reg4 to reg3
+	move $t7, $t8
+	# remove carryover from $t7
+	subu $t7, $t7, $t3
+	# reset then place carryover into $t8
+	addiu $t8, $0, 1
+	j lib_plpfloat_lz4reg_loop
+	nop
+
+	lz4reg_lead_carry:
+	#decriment decimal shift
+	addiu $t0, $t0, -1
+	#incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	j lz4reg_check_leading_reg_full	
+	nop
+
+	lz4reg1_carry:
+	# remove carryover from $t1
+	subu $t1, $t1, $t3
+	# place carryover into $t2
+	addiu $t2, $t2, 1
+	j lz4check_reg2_carry
+	nop
+
+	lz4reg2_carry:
+	# remove carryover from $t2
+	subu $t2, $t2, $t3
+	# place carry into $t7
+	addiu $t7, $t7, 1
+	j lz4check_reg3_carry
+	nop
+
+	lz4reg3_carry:
+	# remove carryover from reg3
+	subu $t7, $t7, $t3
+	# place carry into $t8
+	addiu $t8, $t8, 1
+	j lz4reg_leading_zero_check
+	nop	
+
+	lib_plpfloat_lz4reg_to_1reg:
+	# check if number has nine digits in leading reg
+	beq $t3, $t4, lib_plpfloat_lz4reg_done
+	nop
+	# incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	# store state
+	push $31
+	push $t1
+	push $a0
+	# pass reg3
+	move $a0, $t7
+	# get msd of reg3
+	jal decimal_get_msd
+	nop
+	# restore state
+	pop $a0
+	pop $t1
+	pop $31
+	# remove msd from reg3
+	# 100000000 in t0
+	mullo $t0, $t0, $v0
+	subu $t7, $t7, $t0
+	# multiply reg3 and reg4 by 10
+	mullo $t7, $t7, $t6
+	mullo $t8, $t8, $t6
+	# add msd into leading reg
+	addu $t8, $t8, $v0
+	j lib_plpfloat_lz4reg_to_1reg
+	nop
+	
+	lib_plpfloat_lz4reg_done:
+	move $t1, $t8
+	j lib_plpfloat_less_0_mantissa
+	nop
+
+########## NEW CODE ################
+lib_plpfloat_leading_zeros_5reg:
+	# set-up
+	# $t1 - reg1
+	# $t2 - reg2
+	# $t7 - reg3
+	# $t8 - reg4
+	# $t9 - reg5
+	# remove carryover from $t8
+	subu $t8, $t8, $t3
+	# place carryover into $t9
+	addiu $t9, $0, 1
+	# floating indicator = 10
+	li $t4, 10
+	# set-up finished
+	lib_plpfloat_lz5reg_loop:
+	# end condition decimal shift == 0
+	beq $t0, $0, lib_plpfloat_lz5reg_to_1reg
+	nop
+	# reg1 x 2
+	sll $t1, $t1, 1
+	# reg2 x 2
+	sll $t2, $t2, 1
+	# reg3 x 2
+	sll $t7, $t7, 1
+	# reg4 x 2
+	sll $t8, $t8, 1
+	# reg5 x 2
+	sll $t9, $t9, 1
+	# decriment exponent
+	addiu $t5, $t5, -1
+	#check if reg1 carry needed
+	slt $t6, $t1, $t3 # 0 if carry needed
+	beq $t6, $0, lz5reg1_carry
+	nop
+	lz5check_reg2_carry:
+	#check if reg2 carry needed
+	slt $t6, $t2, $t3 # 0 is carry needed
+	beq $t6, $0, lz5reg2_carry
+	nop
+	lz5check_reg3_carry:
+	#check if reg3 carry needed
+	slt $t6, $t7, $t3 # 0 is carry needed
+	beq $t6, $0, lz5reg3_carry
+	nop
+	lz5check_reg4_carry:
+	#check if reg4 carry needed
+	slt $t6, $t8, $t3 # 0 is carry needed
+	beq $t6, $0, lz5reg4_carry
+
+	lz5reg_leading_zero_check:
+	#check for leading register carry
+	slt $t6, $t9, $t4 # 0 if carry
+	beq $t6, $0, lz5reg_lead_carry
+	nop
+	lz5reg_check_leading_reg_full:
+	#check if left register is full (10 digits)
+	slt $t6, $t9, $t3 # 0 if 10 digits
+	beq $t6, $0, lz5reg_shift_left_4_reg
+	nop
+	j lib_plpfloat_lz5reg_loop
+	nop
+
+	lz5reg_shift_left_4_reg:
+	#move reg2 to reg1
+	move $t1, $t2
+	#move reg3 to reg2
+	move $t2, $t7
+	#move reg4 to reg3
+	move $t7, $t8
+	#move reg5 to reg4
+	move $t8, $t9
+	# remove carryover from reg4
+	subu $t8, $t8, $t3
+	# reset then place carryover into reg5
+	addiu $t9, $0, 1
+	# reset indicator
+	ori $t4, $0, 10
+	j lib_plpfloat_lz5reg_loop
+	nop
+
+	lz5reg_lead_carry:
+	#decriment decimal shift
+	addiu $t0, $t0, -1
+	#incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	j lz5reg_check_leading_reg_full	
+	nop
+
+	lz5reg1_carry:
+	# remove carryover from $t1
+	subu $t1, $t1, $t3
+	# place carryover into $t2
+	addiu $t2, $t2, 1
+	j lz5check_reg2_carry
+	nop
+
+	lz5reg2_carry:
+	# remove carryover from $t2
+	subu $t2, $t2, $t3
+	# place carry into $t7
+	addiu $t7, $t7, 1
+	j lz5check_reg3_carry
+	nop
+
+	lz5reg3_carry:
+	# remove carryover from reg3
+	subu $t7, $t7, $t3
+	# place carry into $t8
+	addiu $t8, $t8, 1
+	j lz5check_reg4_carry
+	nop
+
+	lz5reg4_carry:
+	# remove carryover from reg4
+	subu $t8, $t8, $t3
+	# place carry into reg5
+	addiu $t9, $t9, 1
+	j lz5reg_leading_zero_check
+	nop
+
+	lib_plpfloat_lz5reg_to_1reg:
+	# check if number has nine digits in leading reg
+	beq $t3, $t4, lib_plpfloat_lz5reg_done
+	nop
+	# incriment floating indicator
+	li $t6, 10
+	mullo $t4, $t4, $t6
+	# store state
+	push $31
+	push $t1
+	push $a0
+	# pass reg4
+	move $a0, $t8
+	# get msd of reg4
+	jal decimal_get_msd
+	nop
+	# restore state
+	pop $a0
+	pop $t1
+	pop $31
+	# remove msd from reg4
+	# 100000000 in t0
+	mullo $t0, $t0, $v0
+	subu $t8, $t8, $t0
+	# multiply reg4 and reg5 by 10
+	mullo $t8, $t8, $t6
+	mullo $t9, $t9, $t6
+	# add msd into leading reg
+	addu $t9, $t9, $v0
+	j lib_plpfloat_lz5reg_to_1reg
+	nop
+	
+	lib_plpfloat_lz5reg_done:
+	move $t1, $t9
+	j lib_plpfloat_less_0_mantissa
+	nop
+########## END NEW CODE ###################
+
+
+
+
+	lib_plpfloat_less_0_mantissa:
+#push exponenet & return
+	push $t5
+	push $31
+#put in a flag register to skip left side processing
+	and $t3, $t3, $0
+#take current mullo 10, subtract indicator
+	li $t6, 10
+	mullo $t1, $t1, $t6
+	subu $t1, $t1, $t4
+#pass with indicator to right side process
+	move $t2, $t1 #number
+	move $t1, $t4 #indicator
+	jal process_right_mask_done
+	nop
+	pop $31
+	pop $t5
+	move $t3, $t5
+	j exponent
+	nop
+	j test_end
+	nop
+	
+
+### PROCESS NUMBER ARRAY INTO ONE REGISTER (UP TO 9 DIGITS)
+# $a0 - beginning of array
+# $a1 - end of array
+# $v0 - register containing number
+libplp_float_array9_toreg:
+	move $v0, $0 #clear destination
+	li $t0, 10
+	libplp_float_array9_toreg_loop:
+	nop
+	lw $t1, 0($a0) #get next digit
+	addiu $t1, $t1, -48
+	mullo $v0, $v0, $t0 #shift decimal over
+	addu $v0, $v0, $t1 #add in next digit
+	beq $a0, $a1, libplp_float_array9_toreg_done
+	nop
+	addiu $a0, $a0, -4 #decriment index
+	j libplp_float_array9_toreg_loop
+	nop
+
+	libplp_float_array9_toreg_done:
+	jr $31
+	nop
+	
+
+#$a0 - staring point (1 right of decimal)
+#$v0 - number of leading zeros
+#$v1 - address of first digit
+libplp_float_get_decimal_shift:
+	move $v0, $0
+	move $v1, $0
+	libplp_float_get_0_loop:	
+	lw $t0, 0($a0)
+	addiu $t0, $t0, -48
+	beq $t0, $0, leading_zero
+	nop
+	move $v1, $a0
+	addiu $v0, $v0, 1
+	jr $31
+	nop
+	leading_zero:
+	addiu $v0, $v0, 1
+	addiu $a0, $a0, -4
+	j libplp_float_get_0_loop
+	nop
+
+
+###############################################
+# returns msd of a 9 digit number in a register
+# $a0 - number to be processed
+###############################################
+	# set-up
+	decimal_get_msd:
+	li $t0, 100000000
+	and $v0, $v0, $0
+	#loop
+	get_msd_loop:
+	slt $t1, $t0, $a0
+	beq $t1, $0, get_msd_loop_done
+	nop
+	# subtract 1 from msd
+	subu $a0, $a0, $t0
+	# incriment counter
+	addiu $v0, $v0, 1
+	j get_msd_loop
+	nop
+	get_msd_loop_done:
+	jr $31
+	nop
+
+	test_end:
+	nop
+
